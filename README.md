@@ -1,5 +1,6 @@
-# iMessageDB LLM Query Tool 🚀
-
+<p align="center">
+  <h1>iMessageDB LLM Query Tool 🚀</h1>
+</p>
 <div align="center">
   <img src="assets/icon.png" width="128" height="128" alt="iMessageDB Query Tool Icon">
 </div>
