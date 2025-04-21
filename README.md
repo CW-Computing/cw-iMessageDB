@@ -1,6 +1,6 @@
-<p align="center">
+<div align="center">
   <h1>iMessageDB LLM Query Tool 🚀</h1>
-</p>
+</div>
 <div align="center">
   <img src="assets/icon.png" width="128" height="128" alt="iMessageDB Query Tool Icon">
 </div>
