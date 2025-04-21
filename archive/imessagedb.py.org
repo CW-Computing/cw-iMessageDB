@@ -1,0 +1,427 @@
+import os
+import shutil
+import tkinter as tk
+from tkinter import filedialog, messagebox, scrolledtext
+import sqlite3
+import requests
+from dotenv import load_dotenv, set_key
+from datetime import datetime
+import time
+
+# --- Constants ---
+CHAT_DB_SOURCE = os.path.expanduser("~/Library/Messages/chat.db")
+CHAT_DB_DEST = os.path.join(os.path.dirname(__file__), "chat.db")
+
+class IMessageDBApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("iMessageDB LLM Query Tool")
+        self.llm_provider = tk.StringVar(value="OpenAI")
+        self.openai_api_key = tk.StringVar()
+        self.lmstudio_url = tk.StringVar()
+        self.models = []
+        self.selected_model = tk.StringVar()
+        self.chat_history = []
+        self.db_status = tk.StringVar(value="chat.db not loaded")
+        self.load_env()
+        self.setup_gui()
+        self.update_db_status()
+
+    def setup_gui(self):
+        frm_top = tk.Frame(self.root)
+        frm_top.pack(padx=10, pady=5, fill=tk.X)
+
+        btn_copy_db = tk.Button(frm_top, text="Load chat.db", command=self.load_db)
+        btn_copy_db.pack(side=tk.LEFT)
+
+        tk.Label(frm_top, text="LLM Provider:").pack(side=tk.LEFT, padx=(10,0))
+        opt_provider = tk.OptionMenu(frm_top, self.llm_provider, "OpenAI", "LM Studio", command=self.on_provider_change)
+        opt_provider.pack(side=tk.LEFT)
+
+        self.frm_openai = tk.Frame(frm_top)
+        tk.Label(self.frm_openai, text="OpenAI API Key:").pack(side=tk.LEFT)
+        tk.Entry(self.frm_openai, textvariable=self.openai_api_key, width=30, show="*").pack(side=tk.LEFT)
+        self.frm_openai.pack(side=tk.LEFT, padx=(10,0))
+
+        self.frm_lmstudio = tk.Frame(frm_top)
+        tk.Label(self.frm_lmstudio, text="LM Studio URL:").pack(side=tk.LEFT)
+        tk.Entry(self.frm_lmstudio, textvariable=self.lmstudio_url, width=30).pack(side=tk.LEFT)
+        # Initially hide LM Studio fields
+        self.frm_lmstudio.pack_forget()
+
+        btn_load_models = tk.Button(frm_top, text="Load Models", command=self.load_models)
+        btn_load_models.pack(side=tk.LEFT, padx=(10,0))
+        tk.Label(frm_top, text="Model:").pack(side=tk.LEFT, padx=(10,0))
+        self.opt_models = tk.OptionMenu(frm_top, self.selected_model, "")
+        self.opt_models.pack(side=tk.LEFT)
+
+        btn_save_creds = tk.Button(frm_top, text="Save Credentials", command=self.save_env)
+        btn_save_creds.pack(side=tk.LEFT, padx=(10,0))
+
+        frm_query = tk.Frame(self.root)
+        frm_query.pack(fill=tk.X, padx=10, pady=5)
+        tk.Label(frm_query, text="Ask a question:").pack(side=tk.LEFT)
+        self.entry_query = tk.Entry(frm_query, width=60)
+        self.entry_query.pack(side=tk.LEFT, padx=(5,0))
+        # Bind Enter key to ask_question
+        self.entry_query.bind('<Return>', lambda event: self.ask_question())
+        self.btn_ask = tk.Button(frm_query, text="Ask", command=self.ask_question)
+        self.btn_ask.pack(side=tk.LEFT, padx=(5,0))
+        btn_new_chat = tk.Button(frm_query, text="New Chat", command=self.new_chat)
+        btn_new_chat.pack(side=tk.LEFT, padx=(5,0))
+        
+        # Add DB status label
+        lbl_db_status = tk.Label(frm_query, textvariable=self.db_status, fg='#98FB98')
+        lbl_db_status.pack(side=tk.LEFT, padx=(10,0))
+
+        self.txt_results = scrolledtext.ScrolledText(self.root, width=100, height=25, font=("Consolas", 10))
+        self.txt_results.pack(padx=10, pady=5, fill=tk.BOTH, expand=True)
+
+    def update_db_status(self):
+        if os.path.exists(CHAT_DB_DEST):
+            try:
+                # Get file modification time
+                mod_time = os.path.getmtime(CHAT_DB_DEST)
+                mod_time_str = datetime.fromtimestamp(mod_time).strftime('%Y-%m-%d %H:%M:%S')
+                
+                # Verify it's a valid chat.db by checking a table
+                conn = sqlite3.connect(CHAT_DB_DEST)
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='message'")
+                has_message_table = cursor.fetchone()[0] > 0
+                conn.close()
+                
+                if has_message_table:
+                    self.db_status.set(f"chat.db loaded (from {mod_time_str})")
+                else:
+                    self.db_status.set("Invalid chat.db format")
+            except Exception:
+                self.db_status.set("Error reading chat.db")
+        else:
+            self.db_status.set("chat.db not loaded")
+
+    def load_db(self):
+        try:
+            if os.path.exists(CHAT_DB_DEST):
+                os.remove(CHAT_DB_DEST)
+            shutil.copy2(CHAT_DB_SOURCE, CHAT_DB_DEST)
+            self.update_db_status()
+            messagebox.showinfo("Success", f"Loaded fresh copy of chat.db")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load chat.db: {e}")
+            self.update_db_status()
+
+    def clear_models(self):
+        """Clear the models dropdown and reset selection"""
+        self.models = []
+        self.selected_model.set("")
+        menu = self.opt_models['menu']
+        menu.delete(0, 'end')
+
+    def update_models_dropdown(self):
+        """Update the models dropdown with current models list"""
+        menu = self.opt_models['menu']
+        menu.delete(0, 'end')
+        for model in self.models:
+            menu.add_command(label=model, command=tk._setit(self.selected_model, model))
+        if self.models:
+            self.selected_model.set(self.models[0])
+        else:
+            self.selected_model.set("")
+
+    def load_openai_models(self):
+        """Load models from OpenAI"""
+        api_key = self.openai_api_key.get().strip()
+        if not api_key:
+            return False, "OpenAI API key not set"
+        try:
+            import openai
+            openai.api_key = api_key
+            models = openai.models.list()
+            self.models = [m.id for m in models.data if 'gpt' in m.id]
+            return True, None
+        except Exception as e:
+            return False, f"Failed to load OpenAI models: {e}"
+
+    def load_lmstudio_models(self):
+        """Load models from LM Studio"""
+        url = self.lmstudio_url.get().strip().rstrip('/')
+        if not url:
+            return False, "LM Studio URL not set"
+        try:
+            resp = requests.get(f"{url}/v1/models")
+            resp.raise_for_status()
+            data = resp.json()
+            self.models = [m['id'] for m in data.get('data', [])]
+            return True, None
+        except Exception as e:
+            return False, f"Failed to load LM Studio models: {e}"
+
+    def on_provider_change(self, *args):
+        # Clear existing models first
+        self.clear_models()
+        
+        if self.llm_provider.get() == "OpenAI":
+            self.frm_lmstudio.pack_forget()
+            self.frm_openai.pack(side=tk.LEFT, padx=(10,0))
+            # Try to auto-load OpenAI models if API key exists
+            if self.openai_api_key.get().strip():
+                success, error = self.load_openai_models()
+                if success:
+                    self.update_models_dropdown()
+                else:
+                    messagebox.showinfo("Info", "Please click 'Load Models' to load available models")
+        else:
+            self.frm_openai.pack_forget()
+            self.frm_lmstudio.pack(side=tk.LEFT, padx=(10,0))
+            # Try to auto-load LM Studio models if URL exists
+            if self.lmstudio_url.get().strip():
+                success, error = self.load_lmstudio_models()
+                if success:
+                    self.update_models_dropdown()
+                else:
+                    messagebox.showinfo("Info", "Please click 'Load Models' to load available models")
+
+    def load_models(self):
+        provider = self.llm_provider.get()
+        self.clear_models()
+        
+        if provider == "OpenAI":
+            success, error = self.load_openai_models()
+        else:
+            success, error = self.load_lmstudio_models()
+            
+        if success:
+            self.update_models_dropdown()
+            if self.models:
+                messagebox.showinfo("Success", f"Loaded {len(self.models)} models")
+            else:
+                messagebox.showwarning("Warning", "No compatible models found")
+        else:
+            messagebox.showerror("Error", error)
+
+    def ask_question(self):
+        self.btn_ask.config(state=tk.DISABLED, text="Processing...")
+        self.root.update_idletasks()
+        question = self.entry_query.get().strip()
+        if not question:
+            messagebox.showerror("Error", "Please enter a question.")
+            self.btn_ask.config(state=tk.NORMAL, text="Ask")
+            return
+        if not os.path.exists(CHAT_DB_DEST):
+            messagebox.showerror("Error", "chat.db not found in project directory. Please load it first.")
+            self.btn_ask.config(state=tk.NORMAL, text="Ask")
+            return
+        provider = self.llm_provider.get()
+        model = self.selected_model.get()
+        if not model:
+            messagebox.showerror("Error", "Please load and select a model first.")
+            self.btn_ask.config(state=tk.NORMAL, text="Ask")
+            return
+        
+        # Verify model is compatible with current provider
+        if provider == "OpenAI" and not any(model == m for m in self.models):
+            messagebox.showerror("Error", "Selected model is not compatible with OpenAI. Please load OpenAI models and select one.")
+            self.clear_models()
+            self.btn_ask.config(state=tk.NORMAL, text="Ask")
+            return
+        elif provider == "LM Studio" and not any(model == m for m in self.models):
+            messagebox.showerror("Error", "Selected model is not compatible with LM Studio. Please load LM Studio models and select one.")
+            self.clear_models()
+            self.btn_ask.config(state=tk.NORMAL, text="Ask")
+            return
+
+        # --- Add user message to chat history (raw question only) ---
+        self.chat_history.append({"role": "user", "content": question})
+        
+        # Filter chat history for LLM to only include user and assistant messages
+        llm_messages = [
+            msg for msg in self.chat_history 
+            if msg["role"] in ["user", "assistant"]
+        ]
+        
+        # --- Compose prompt ---
+        prompt = self.compose_prompt(question)
+        sql = None
+        try:
+            import json
+            if provider == "OpenAI":
+                import openai
+                client = openai.OpenAI(api_key=self.openai_api_key.get().strip())
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": "You are an expert at generating SQLite SQL queries for the iMessage chat.db. Only output the SQL query, no explanation. Return your answer as a JSON object with a single key 'sql', like this: {\"sql\": \"SELECT ...\"}"}
+                    ] + llm_messages,
+                    max_tokens=500,
+                    temperature=0,
+                    response_format={"type": "json_object"}
+                )
+                # Parse JSON response
+                content = response.choices[0].message.content.strip()
+                # Robustly extract the first JSON object in the response
+                json_start = content.find('{')
+                json_end = content.rfind('}')
+                sql = ""
+                if json_start != -1 and json_end != -1 and json_end > json_start:
+                    json_str = content[json_start:json_end+1]
+                    try:
+                        sql_json = json.loads(json_str)
+                        sql = sql_json.get('sql', '').strip()
+                    except Exception:
+                        sql = json_str  # fallback
+                else:
+                    sql = content  # fallback
+            else:
+                url = self.lmstudio_url.get().strip().rstrip('/')
+                resp = requests.post(f"{url}/v1/chat/completions", json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": "You are an expert at generating SQLite SQL queries for the iMessage chat.db. The main table is named 'message' (singular, not plural). Only output the SQL query, no explanation. Return your answer as a JSON object with a single key 'sql', like this: {\"sql\": \"SELECT ...\"}"}
+                    ] + llm_messages,
+                    "max_tokens": 500,
+                    "temperature": 0,
+                    "structured_output": {
+                        "type": "object",
+                        "properties": {
+                            "sql": {"type": "string"}
+                        },
+                        "required": ["sql"]
+                    }
+                })
+                resp.raise_for_status()
+                content = resp.json()['choices'][0]['message']['content'].strip()
+                # Robustly extract the first JSON object in the response
+                json_start = content.find('{')
+                json_end = content.rfind('}')
+                sql = ""
+                if json_start != -1 and json_end != -1 and json_end > json_start:
+                    json_str = content[json_start:json_end+1]
+                    try:
+                        sql_json = json.loads(json_str)
+                        sql = sql_json.get('sql', '').strip()
+                    except Exception:
+                        sql = json_str  # fallback
+                else:
+                    sql = content  # fallback
+        except Exception as e:
+            error_msg = f"Error calling LLM: {e}\n"
+            self.chat_history.append({"role": "error", "content": error_msg})
+            self.display_conversation()
+            self.btn_ask.config(state=tk.NORMAL, text="Ask")
+            return
+
+        # Clear the question entry after getting response
+        self.entry_query.delete(0, tk.END)
+
+        # --- Add assistant message to chat history (raw SQL only) ---
+        self.chat_history.append({"role": "assistant", "content": sql})
+        # --- Run SQL on chat.db ---
+        try:
+            conn = sqlite3.connect(CHAT_DB_DEST)
+            cursor = conn.cursor()
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description] if cursor.description else []
+            result_text = self.format_results(columns, rows)
+            # Add query results to chat history
+            self.chat_history.append({"role": "result", "content": result_text})
+        except Exception as e:
+            error_msg = f"Error running SQL: {e}\n"
+            self.chat_history.append({"role": "error", "content": error_msg})
+        finally:
+            conn.close()
+        # --- Display full conversation ---
+        self.display_conversation()
+        self.btn_ask.config(state=tk.NORMAL, text="Ask")
+
+    def compose_prompt(self, question):
+        # Load schema
+        schema_path = os.path.join(os.path.dirname(__file__), "dbinfo.schema")
+        example_path = os.path.join(os.path.dirname(__file__), "imessage-counts.sql")
+        try:
+            with open(schema_path, 'r') as f:
+                schema = f.read()
+        except Exception:
+            schema = "[Could not load schema]"
+        try:
+            with open(example_path, 'r') as f:
+                example_query = f.read()
+        except Exception:
+            example_query = "[Could not load example query]"
+        system_prompt = (
+            "You are an expert SQLite query generator. Only output a valid SQLite SQL query, with no explanation or commentary. "
+            "The database is Apple's iMessage chat.db. Use only tables and columns that exist in this schema. "
+            "Here is the schema:\n" + schema + "\n"
+            "Here is an example query:\n" + example_query + "\n"
+            "User will ask a question about the data. Generate a single SQL query that answers it. "
+            "Return your answer as a JSON object with a single key 'sql', like this: {\"sql\": \"SELECT ...\"}"
+        )
+        prompt = f"{system_prompt}\nQuestion: {question}"
+        return prompt
+
+    def new_chat(self):
+        self.txt_results.delete('1.0', tk.END)
+        self.chat_history = []
+
+    def display_conversation(self):
+        self.txt_results.delete('1.0', tk.END)
+        
+        # Configure text widget background
+        self.txt_results.configure(bg='#1e1e1e')  # Dark background
+        
+        # Configure text tags for styling
+        self.txt_results.tag_configure("user", foreground="#6495ED")  # Cornflower blue
+        self.txt_results.tag_configure("sql", foreground="#98FB98")   # Pale green
+        self.txt_results.tag_configure("result", foreground="#FFFFFF") # White
+        self.txt_results.tag_configure("error", foreground="#FF6B6B")  # Coral red
+        
+        for msg in self.chat_history:
+            if msg['role'] == 'user':
+                self.txt_results.insert(tk.END, f"User: {msg['content']}\n", "user")
+            elif msg['role'] == 'assistant':
+                self.txt_results.insert(tk.END, f"SQL: {msg['content']}\n", "sql")
+            elif msg['role'] == 'result':
+                self.txt_results.insert(tk.END, f"\n--- Query Results ---\n{msg['content']}\n", "result")
+            elif msg['role'] == 'error':
+                self.txt_results.insert(tk.END, f"Error: {msg['content']}\n", "error")
+        
+        # Scroll to the bottom to show latest results
+        self.txt_results.see(tk.END)
+
+    def load_env(self):
+        env_path = os.path.join(os.path.dirname(__file__), '.env')
+        if os.path.exists(env_path):
+            load_dotenv(env_path, override=True)
+            api_key = os.getenv('OPENAI_API_KEY', '')
+            lmstudio_url = os.getenv('LMSTUDIO_URL', '')
+            if api_key:
+                self.openai_api_key.set(api_key)
+            if lmstudio_url:
+                self.lmstudio_url.set(lmstudio_url)
+
+    def save_env(self):
+        env_path = os.path.join(os.path.dirname(__file__), '.env')
+        if not os.path.exists(env_path):
+            with open(env_path, 'w') as f:
+                f.write('')
+        set_key(env_path, 'OPENAI_API_KEY', self.openai_api_key.get())
+        set_key(env_path, 'LMSTUDIO_URL', self.lmstudio_url.get())
+        messagebox.showinfo("Saved", f"Credentials saved to {env_path}")
+
+    def format_results(self, columns, rows):
+        if not rows:
+            return "No results."
+        output = '\t'.join(columns) + '\n'
+        for row in rows:
+            output += '\t'.join(str(x) for x in row) + '\n'
+        return output
+
+
+def main():
+    root = tk.Tk()
+    app = IMessageDBApp(root)
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()

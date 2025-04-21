@@ -1,0 +1,16 @@
+# Ignore saved chat exports
+saved_chats/
+
+# Ignore all SQLite databases
+*.db
+
+# Ignore environment files
+.env
+
+# Ignore macOS Contacts AddressBook database (even if copied in)
+AddressBook-v22.abcddb
+
+# (Optional) MacOS system junk
+.DS_Store
+chat.db-shm
+chat.db-wal
