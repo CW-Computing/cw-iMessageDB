@@ -572,15 +572,6 @@ IMPORTANT QUERY RULES:
    - The application will handle the summarization after getting the messages
    - Do NOT try to summarize in SQL - return the full messages
 
-6. For phone number queries:
-   - When querying by phone number, use LIKE with % to match any format
-   - Example: WHERE handle.id LIKE '%5402632439%' will match:
-     - 5402632439
-     - +15402632439
-     - +5402632439
-     - 15402632439
-   - This ensures users don't need to know the exact format
-
 Only output the SQL query as a JSON object with a single 'sql' key. No explanation needed."""}
                     ] + llm_messages,
                     max_tokens=500,
@@ -637,15 +628,6 @@ IMPORTANT QUERY RULES:
    - Use the same query format as message content queries (#1)
    - The application will handle the summarization after getting the messages
    - Do NOT try to summarize in SQL - return the full messages
-
-6. For phone number queries:
-   - When querying by phone number, use LIKE with % to match any format
-   - Example: WHERE handle.id LIKE '%5402632439%' will match:
-     - 5402632439
-     - +15402632439
-     - +5402632439
-     - 15402632439
-   - This ensures users don't need to know the exact format
 
 Only output the SQL query as a JSON object with a single 'sql' key. No explanation needed."""}
                     ] + llm_messages,
@@ -736,17 +718,17 @@ Only output the SQL query as a JSON object with a single 'sql' key. No explanati
         
         for msg in self.current_chat.history:
             if msg['role'] == 'model_info':
-                self.txt_results.insert(tk.END, f"{msg['content']}\n\n", "model_info")
+                self.txt_results.insert(tk.END, f"{msg['content']}\n", "model_info")
             elif msg['role'] == 'user':
-                self.txt_results.insert(tk.END, f"User: {msg['content']}\n\n", "user")
+                self.txt_results.insert(tk.END, f"User: {msg['content']}\n", "user")
             elif msg['role'] == 'assistant':
-                self.txt_results.insert(tk.END, f"SQL: {msg['content']}\n\n", "sql")
+                self.txt_results.insert(tk.END, f"SQL: {msg['content']}\n", "sql")
             elif msg['role'] == 'result':
-                self.txt_results.insert(tk.END, f"\n--- Query Results ---\n{msg['content']}\n\n", "result")
+                self.txt_results.insert(tk.END, f"\n--- Query Results ---\n{msg['content']}\n", "result")
             elif msg['role'] == 'summary':
-                self.txt_results.insert(tk.END, f"\n--- Summary ---\n{msg['content']}\n\n", "summary")
+                self.txt_results.insert(tk.END, f"\n--- Summary ---\n{msg['content']}\n", "summary")
             elif msg['role'] == 'error':
-                self.txt_results.insert(tk.END, f"Error: {msg['content']}\n\n", "error")
+                self.txt_results.insert(tk.END, f"Error: {msg['content']}\n", "error")
         
         self.txt_results.see(tk.END)
 
@@ -976,7 +958,14 @@ def main():
                     # Method 3: Try basic iconphoto
                     root.iconphoto(True, tk.PhotoImage(file=icon_path))
                 except Exception as e3:
-                    print(f"Could not set icon: {e1}, {e2}, {e3}")
+                    try:
+                        # Method 4: Try NSApplication dock icon (macOS specific)
+                        from Foundation import NSImage
+                        from AppKit import NSApplication
+                        image = NSImage.alloc().initWithContentsOfFile_(os.path.abspath(icon_path))
+                        NSApplication.sharedApplication().setApplicationIconImage_(image)
+                    except Exception as e4:
+                        print(f"Could not set icon: {e1}, {e2}, {e3}, {e4}")
     
     app = IMessageDBApp(root)
     root.mainloop()
