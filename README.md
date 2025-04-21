@@ -1,5 +1,9 @@
 # iMessageDB LLM Query Tool 🚀
 
+<div align="center">
+  <img src="assets/icon.png" width="128" height="128" alt="iMessageDB Query Tool Icon">
+</div>
+
 > Ever wished you could have a conversation with your iMessage history? Now you can! Ask natural language questions about your messages and get instant insights.
 
 ![iMessageDB LLM Query Tool](/assets/mainapp.png)

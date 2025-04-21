@@ -47,6 +47,11 @@ class IMessageDBApp:
         self.root = root
         self.root.title("iMessageDB LLM Query Tool")
         
+        # Set application icon
+        icon_path = os.path.join(os.path.dirname(__file__), "assets", "icon.icns")
+        if os.path.exists(icon_path):
+            self.root.iconbitmap(icon_path)
+        
         # Set minimum window size and default size
         self.root.minsize(1200, 700)
         self.root.geometry("1400x800")
@@ -941,32 +946,6 @@ Only output the SQL query as a JSON object with a single 'sql' key. No explanati
 
 def main():
     root = tk.Tk()
-    
-    # Set dock icon on macOS - try multiple methods
-    icon_path = os.path.join(os.path.dirname(__file__), "assets", "icon.png")
-    if os.path.exists(icon_path):
-        try:
-            # Method 1: Try tk::mac::setAppIcon (macOS specific)
-            root.tk.call('tk::mac::setAppIcon', os.path.abspath(icon_path))
-        except Exception as e1:
-            try:
-                # Method 2: Try setting window icon
-                img = tk.PhotoImage(file=icon_path)
-                root.tk.call('wm', 'iconphoto', root._w, img)
-            except Exception as e2:
-                try:
-                    # Method 3: Try basic iconphoto
-                    root.iconphoto(True, tk.PhotoImage(file=icon_path))
-                except Exception as e3:
-                    try:
-                        # Method 4: Try NSApplication dock icon (macOS specific)
-                        from Foundation import NSImage
-                        from AppKit import NSApplication
-                        image = NSImage.alloc().initWithContentsOfFile_(os.path.abspath(icon_path))
-                        NSApplication.sharedApplication().setApplicationIconImage_(image)
-                    except Exception as e4:
-                        print(f"Could not set icon: {e1}, {e2}, {e3}, {e4}")
-    
     app = IMessageDBApp(root)
     root.mainloop()
 
