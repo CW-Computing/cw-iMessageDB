@@ -547,8 +547,10 @@ IMPORTANT QUERY RULES:
 2. For date-based queries:
    - message.date is in nanoseconds since 2001-01-01
    - Use 978307200 as the epoch offset (seconds between 1970 and 2001)
-   - For "last 24 hours" or recent time queries, use:
-     WHERE datetime(message.date/1000000000 + 978307200, 'unixepoch') >= datetime('now', '-1 day')
+   - For relative time queries (last 24 hours, etc):
+     A. For last 24 hours, use:
+        WHERE message.date >= (strftime('%s', 'now', '-1 day') - 978307200) * 1000000000
+     B. For other relative times, adjust the '-1 day' part accordingly
    - For specific date ranges, use similar datetime() comparisons
 
 3. For aggregate queries (ONLY for count/statistics, NOT for summaries):
@@ -613,8 +615,10 @@ IMPORTANT QUERY RULES:
 2. For date-based queries:
    - message.date is in nanoseconds since 2001-01-01
    - Use 978307200 as the epoch offset (seconds between 1970 and 2001)
-   - For "last 24 hours" or recent time queries, use:
-     WHERE datetime(message.date/1000000000 + 978307200, 'unixepoch') >= datetime('now', '-1 day')
+   - For relative time queries (last 24 hours, etc):
+     A. For last 24 hours, use:
+        WHERE message.date >= (strftime('%s', 'now', '-1 day') - 978307200) * 1000000000
+     B. For other relative times, adjust the '-1 day' part accordingly
    - For specific date ranges, use similar datetime() comparisons
 
 3. For aggregate queries (ONLY for count/statistics, NOT for summaries):
