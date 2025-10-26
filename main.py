@@ -9,6 +9,9 @@ from datetime import datetime
 import time
 import json
 import re
+import threading
+import queue
+import tiktoken
 
 # --- Constants ---
 CHAT_DB_SOURCE = os.path.expanduser("~/Library/Messages/chat.db")
@@ -63,6 +66,13 @@ class IMessageDBApp:
         self.chats = []
         self.current_chat = None
         self.chat_index_map = {}
+        
+        # Summary processing
+        self.summary_queue = queue.Queue()
+        self.summary_thread = None
+        self.summary_progress = tk.StringVar(value="")
+        self.summary_progress_label = None
+        self.summary_running = False
         
         # Create chats directory if it doesn't exist
         os.makedirs(CHATS_DIR, exist_ok=True)
@@ -184,6 +194,10 @@ class IMessageDBApp:
         # DB status label with name for identification
         self.db_status_label = ttk.Label(frm_query, textvariable=self.db_status)
         self.db_status_label.pack(side=tk.LEFT, padx=(10,0))
+
+        # Add progress label for summaries
+        self.summary_progress_label = ttk.Label(frm_query, textvariable=self.summary_progress)
+        self.summary_progress_label.pack(side=tk.LEFT, padx=(10,0))
 
         # Results text area
         self.txt_results = scrolledtext.ScrolledText(self.content, width=100, height=25, 
@@ -434,9 +448,59 @@ class IMessageDBApp:
         question_lower = question.lower()
         return any(keyword in question_lower for keyword in summarization_keywords)
 
+    def get_max_tokens(self, provider, model):
+        """Get maximum context length for the current model"""
+        if provider == "OpenAI":
+            if "gpt-4" in model:
+                return 8192
+            elif "gpt-3.5" in model:
+                return 4096
+            else:
+                return 4096  # Default for other models
+        else:  # LM Studio
+            # More conservative limits for local models
+            if "llama" in model.lower():
+                return 2048  # Conservative limit for Llama models
+            return 2048  # Default for other local models
+
+    def count_tokens(self, text, provider, model):
+        """Count tokens in text"""
+        if provider == "OpenAI":
+            encoding = tiktoken.encoding_for_model(model)
+            return len(encoding.encode(text))
+        else:
+            # More conservative estimate for local models (1 token ≈ 3 characters)
+            return len(text) // 3
+
     def summarize_results(self, results, question, provider, model):
-        """Use LLM to summarize query results"""
+        """Use LLM to summarize query results with proper token handling"""
+        if self.summary_running:
+            return "A summary is already being processed. Please wait."
+            
         try:
+            self.summary_running = True
+            # Start summary thread
+            self.summary_thread = threading.Thread(
+                target=self._summarize_thread,
+                args=(results, question, provider, model)
+            )
+            self.summary_thread.daemon = True
+            self.summary_thread.start()
+            
+            # Return immediately to keep UI responsive
+            return "Processing summary in background..."
+
+        except Exception as e:
+            self.summary_running = False
+            error_msg = f"Error starting summary: {str(e)}"
+            if "context length" in str(e).lower():
+                error_msg += "\n\nNote: The message history is too large for the current model's context window. Try using a model with a larger context window or narrowing your search criteria."
+            return error_msg
+
+    def _summarize_thread(self, results, question, provider, model):
+        """Background thread for processing summaries"""
+        try:
+            max_tokens = self.get_max_tokens(provider, model)
             system_prompt = """You are a helpful assistant analyzing iMessage conversations. 
 Given the messages below, provide a concise summary focusing on:
 - Main topics discussed
@@ -446,32 +510,229 @@ Given the messages below, provide a concise summary focusing on:
 
 Keep the summary clear and focused. If there are no messages, just say so."""
 
-            if provider == "OpenAI":
-                import openai
-                client = openai.OpenAI(api_key=self.openai_api_key.get().strip())
-                response = client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": f"Question: {question}\n\nMessages:\n{results}"}
-                    ],
-                    temperature=0.3
-                )
-                return response.choices[0].message.content.strip()
+            # Calculate token usage for system prompt and question
+            system_tokens = self.count_tokens(system_prompt, provider, model)
+            question_tokens = self.count_tokens(question, provider, model)
+            # More conservative buffer for local models
+            buffer_tokens = 200 if provider == "OpenAI" else 300
+            available_tokens = max_tokens - system_tokens - question_tokens - buffer_tokens
+
+            # Split messages into chunks based on token count
+            messages = results.split('\n')
+            current_chunk = []
+            current_tokens = 0
+            chunks = []
+
+            for msg in messages:
+                msg_tokens = self.count_tokens(msg, provider, model)
+                if current_tokens + msg_tokens > available_tokens:
+                    if current_chunk:
+                        chunks.append('\n'.join(current_chunk))
+                    current_chunk = [msg]
+                    current_tokens = msg_tokens
+                else:
+                    current_chunk.append(msg)
+                    current_tokens += msg_tokens
+
+            if current_chunk:
+                chunks.append('\n'.join(current_chunk))
+
+            if not chunks:
+                self.root.after(0, lambda: self.summary_queue.put("No messages to summarize."))
+                return
+
+            self.root.after(0, lambda: self.summary_progress.set(f"Found {len(chunks)} chunks to process..."))
+            
+            summaries = []
+            total_chunks = len(chunks)
+            
+            for i, chunk in enumerate(chunks):
+                try:
+                    self.root.after(0, lambda: self.summary_progress.set(f"Processing chunk {i+1}/{total_chunks}..."))
+                    
+                    if provider == "OpenAI":
+                        import openai
+                        client = openai.OpenAI(api_key=self.openai_api_key.get().strip())
+                        response = client.chat.completions.create(
+                            model=model,
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": f"Question: {question}\n\nMessages:\n{chunk}"}
+                            ],
+                            temperature=0.3
+                        )
+                        chunk_summary = response.choices[0].message.content.strip()
+                    else:
+                        url = self.lmstudio_url.get().strip().rstrip('/')
+                        try:
+                            # More conservative max_tokens for local models
+                            resp = requests.post(
+                                f"{url}/v1/chat/completions",
+                                json={
+                                    "model": model,
+                                    "messages": [
+                                        {"role": "system", "content": system_prompt},
+                                        {"role": "user", "content": f"Question: {question}\n\nMessages:\n{chunk}"}
+                                    ],
+                                    "temperature": 0.3,
+                                    "max_tokens": 500  # Reduced from 1000
+                                },
+                                timeout=30
+                            )
+                            
+                            # Check for error response
+                            if resp.status_code != 200:
+                                error_data = resp.json() if resp.text else {}
+                                error_msg = error_data.get('error', {}).get('message', str(resp.status_code))
+                                if "context length" in error_msg.lower():
+                                    raise ValueError("context length error")
+                                raise requests.exceptions.RequestException(f"LM Studio error: {error_msg}")
+                                
+                            response_data = resp.json()
+                            if 'choices' not in response_data or not response_data['choices']:
+                                raise ValueError("Invalid response format from LM Studio")
+                                
+                            chunk_summary = response_data['choices'][0]['message']['content'].strip()
+                            
+                        except requests.exceptions.RequestException as e:
+                            error_msg = str(e)
+                            if "context length" in error_msg.lower():
+                                raise ValueError("context length error")
+                            self.root.after(0, lambda: self.summary_queue.put(f"Error connecting to LM Studio: {error_msg}"))
+                            return
+                        except ValueError as e:
+                            if str(e) == "context length error":
+                                raise
+                            self.root.after(0, lambda: self.summary_queue.put(f"Error processing LM Studio response: {str(e)}"))
+                            return
+                    
+                    if not chunk_summary:
+                        raise ValueError("Empty summary received")
+                        
+                    summaries.append(chunk_summary)
+                    self.root.after(0, lambda: self.summary_progress.set(f"Processed chunk {i+1}/{total_chunks}"))
+                    
+                except ValueError as e:
+                    if str(e) == "context length error":
+                        self.root.after(0, lambda: self.summary_queue.put(
+                            "Error: Message history too large for model's context window.\n\n"
+                            "Please try one of these options:\n"
+                            "1. Use a model with a larger context window\n"
+                            "2. Narrow your search criteria (e.g., specific date range)\n"
+                            "3. Use a different summary approach"
+                        ))
+                    else:
+                        self.root.after(0, lambda: self.summary_queue.put(f"Error processing chunk {i+1}: {str(e)}"))
+                    return
+                except Exception as e:
+                    self.root.after(0, lambda: self.summary_queue.put(f"Error processing chunk {i+1}: {str(e)}"))
+                    return
+
+            if not summaries:
+                self.root.after(0, lambda: self.summary_queue.put("No summaries were generated successfully."))
+                return
+
+            # Combine summaries if needed
+            if len(summaries) > 1:
+                self.root.after(0, lambda: self.summary_progress.set("Combining summaries..."))
+                
+                try:
+                    combined_summaries = "\n\n".join(summaries)
+                    if provider == "OpenAI":
+                        response = client.chat.completions.create(
+                            model=model,
+                            messages=[
+                                {"role": "system", "content": "You are a helpful assistant. Please combine these summaries into one coherent summary, removing any redundancy."},
+                                {"role": "user", "content": f"Please combine these summaries:\n\n{combined_summaries}"}
+                            ],
+                            temperature=0.3
+                        )
+                        final_summary = response.choices[0].message.content.strip()
+                    else:
+                        try:
+                            resp = requests.post(
+                                f"{url}/v1/chat/completions",
+                                json={
+                                    "model": model,
+                                    "messages": [
+                                        {"role": "system", "content": "You are a helpful assistant. Please combine these summaries into one coherent summary, removing any redundancy."},
+                                        {"role": "user", "content": f"Please combine these summaries:\n\n{combined_summaries}"}
+                                    ],
+                                    "temperature": 0.3,
+                                    "max_tokens": 500  # Reduced from 1000
+                                },
+                                timeout=30
+                            )
+                            
+                            # Check for error response
+                            if resp.status_code != 200:
+                                error_data = resp.json() if resp.text else {}
+                                error_msg = error_data.get('error', {}).get('message', str(resp.status_code))
+                                if "context length" in error_msg.lower():
+                                    raise ValueError("context length error")
+                                raise requests.exceptions.RequestException(f"LM Studio error: {error_msg}")
+                                
+                            response_data = resp.json()
+                            if 'choices' not in response_data or not response_data['choices']:
+                                raise ValueError("Invalid response format from LM Studio")
+                                
+                            final_summary = response_data['choices'][0]['message']['content'].strip()
+                            
+                        except requests.exceptions.RequestException as e:
+                            error_msg = str(e)
+                            if "context length" in error_msg.lower():
+                                raise ValueError("context length error")
+                            self.root.after(0, lambda: self.summary_queue.put(f"Error connecting to LM Studio: {error_msg}"))
+                            return
+                        except ValueError as e:
+                            if str(e) == "context length error":
+                                raise
+                            self.root.after(0, lambda: self.summary_queue.put(f"Error processing LM Studio response: {str(e)}"))
+                            return
+                except ValueError as e:
+                    if str(e) == "context length error":
+                        self.root.after(0, lambda: self.summary_queue.put(
+                            "Error: Message history too large for model's context window.\n\n"
+                            "Please try one of these options:\n"
+                            "1. Use a model with a larger context window\n"
+                            "2. Narrow your search criteria (e.g., specific date range)\n"
+                            "3. Use a different summary approach"
+                        ))
+                    else:
+                        self.root.after(0, lambda: self.summary_queue.put(f"Error combining summaries: {str(e)}"))
+                    return
+                except Exception as e:
+                    self.root.after(0, lambda: self.summary_queue.put(f"Error combining summaries: {str(e)}"))
+                    return
             else:
-                url = self.lmstudio_url.get().strip().rstrip('/')
-                resp = requests.post(f"{url}/v1/chat/completions", json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": f"Question: {question}\n\nMessages:\n{results}"}
-                    ],
-                    "temperature": 0.3
-                })
-                resp.raise_for_status()
-                return resp.json()['choices'][0]['message']['content'].strip()
+                final_summary = summaries[0]
+
+            if not final_summary:
+                final_summary = "No summary could be generated."
+
+            # Update UI with final summary
+            self.root.after(0, lambda: self.summary_queue.put(final_summary))
+            self.root.after(0, lambda: self.summary_progress.set(""))
+
+        except ValueError as e:
+            if str(e) == "context length error":
+                error_msg = (
+                    "Error: Message history too large for model's context window.\n\n"
+                    "Please try one of these options:\n"
+                    "1. Use a model with a larger context window\n"
+                    "2. Narrow your search criteria (e.g., specific date range)\n"
+                    "3. Use a different summary approach"
+                )
+            else:
+                error_msg = f"Error generating summary: {str(e)}"
+            self.root.after(0, lambda: self.summary_queue.put(error_msg))
+            self.root.after(0, lambda: self.summary_progress.set(""))
         except Exception as e:
-            return f"Error generating summary: {e}"
+            error_msg = f"Error generating summary: {str(e)}"
+            self.root.after(0, lambda: self.summary_queue.put(error_msg))
+            self.root.after(0, lambda: self.summary_progress.set(""))
+        finally:
+            self.summary_running = False
 
     def ask_question(self):
         if not self.current_chat:
@@ -730,6 +991,16 @@ Only output the SQL query as a JSON object with a single 'sql' key. No explanati
         self.save_chats()
         self.display_conversation()
         self.btn_ask.config(state=tk.NORMAL, text="Ask")
+
+        # Check for summary updates
+        try:
+            while not self.summary_queue.empty():
+                summary = self.summary_queue.get_nowait()
+                if summary:
+                    self.current_chat.add_message("summary", summary)
+                    self.display_conversation()
+        except queue.Empty:
+            pass
 
     def display_conversation(self):
         """Display the current chat conversation"""

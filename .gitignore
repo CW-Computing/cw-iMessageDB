@@ -14,3 +14,4 @@ AddressBook-v22.abcddb
 .DS_Store
 chat.db-shm
 chat.db-wal
+/venv
